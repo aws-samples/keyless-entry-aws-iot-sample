@@ -1,0 +1,22 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: An AWS Serverless Specification template describing your function.
+Resources:
+  AmazonConnectWriteToIoTBuzzerRequest:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs12.x
+      CodeUri: .
+      Description: ''
+      MemorySize: 128
+      Timeout: 3
+      Role: >-
+        arn:aws:iam::869632005839:role/service-role/AmazonConnect-WriteToIoT-BuzzerRequest-role-9lhg18io
+      Environment:
+        Variables:
+          dDBTableName: AmazonConnect-WriteToIoT-entryCode
+          mqttSecretSsmName: AmazonConnect-WriteToIoT-entryCode-mqttSecret
