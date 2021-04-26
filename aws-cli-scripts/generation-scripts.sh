@@ -24,8 +24,3 @@ aws iot create-keys-and-certificate \
     --public-key-outfile iotbuzzerpublic.key \
     --private-key-outfile iotbuzzerprivate.key \
     --region $REGION
-
-#STEP 6. Create a policy for your certificate
-aws iot create-policy \
-    --policy-name iotbuzzer \
-    --policy-document '{"Version": "2012-10-17","Statement": [{"Effect": "Allow","Action": ["iot:Connect","iot:Publish","iot:Receive","iot:Subscribe"],"Resource": "*"}]}'
