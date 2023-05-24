@@ -1,0 +1,400 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+    "Deploy a voice triggered remote access function for your home or office via Amazon Connect & AWS IoT:
+    - Create the basic foundational infrastructure for processing access requests via Lambda, DynamoDB, IoT Core
+    - Dynamo DB table: IoTBuzzer-EntryCodes
+    - A NodeJS Lambda triggered on inbound calls via Amazon Connect Contact Flows
+    - An IoT Policy
+    - An IoT Thing (for the micro controller)
+    - v1.0.0"
+
+Mappings:
+    FunctionMap:
+        Configuration:
+            S3Bucket: "nicklo-cfn-lambda-deployments"
+            S3Key: "iot-buzzer/v1.0.1/"
+
+Parameters:
+    instanceIdParam:
+        Type: String
+        AllowedPattern: '\w{8}-\w{4}-\w{4}-\w{4}-\w{12}'
+        ConstraintDescription: "Invalid Amazon Connect instance Id"
+        Description: Amazon Connect Instance ID (Ensure you it is entered accurately in the format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx ).
+    instanceNameParam:
+        Type: String
+        ConstraintDescription: "Invalid Amazon Connect instance alias"
+        Description: Amazon Connect Instance Alias (Ensure you it is entered accurately as configured under Amazon Connect Service ).
+    iotCoreEndpointParam:
+        Type: String
+        AllowedPattern: '([a-z0-9]+)\-[a-z]+.iot.[a-z][a-z]-[a-z]{4,10}-[1-20].amazonaws.com'
+        ConstraintDescription: "Invalid IoTCore Endpoint"
+        Description: AWS IoT Core Endpoint for publishing messages.
+    entryCodeMqttSecretName:
+        Type: String
+        Description: The AWS Systems Manager (SSM) Parameter name for secret key for micro-controller to verify published messages before acting.
+    IoTCertificateArn:
+        Type: String
+        Description: The AWS IoT Core certificate ARN that will be used to authenticate your device(s)
+    IotPubTopic:
+        Type: String
+        AllowedPattern: '^([A-Za-z0-9_]+)([\/][A-Za-z0-9_]+){0,4}$(?!\/)'
+        Description: The AWS IoT Core topic that will be used to publish messages from your local IoT device to IoT Core
+        Default: Esp32B/buzzer/output
+    IotSubTopic:
+        Type: String
+        AllowedPattern: '^([A-Za-z0-9_]+)([\/][A-Za-z0-9_]+){0,4}$(?!\/)'
+        Description: TThe AWS IoT Core topic that will be used to subscribe to messages published by Amazon Connect to your local IoT device
+        Default: Esp32B/buzzer/input
+    DeviceName:
+        Type: String
+        Description: Name of your ESP device as defined in the Sketch -  Default is Esp32B.
+        Default: Esp32B
+    OverrideLambdaS3Bucket: 
+        Type: String
+        Description: Put the name of your S3 bucket here if you are overriding the S3 Bucket containing the lambda code for the door buzzer function invoked by Amazon Connect
+    OverrideLambdaS3Key:    
+        Type: String
+        Description: Put the name of your S3 key here if you are overriding the S3 Key containing the lambda code for the door buzzer function invoked by Amazon Connect
+ 
+        
+Conditions:
+  OverrideLambdaS3Bucket: !Equals
+    - !Ref OverrideLambdaS3Bucket
+    - ''
+  OverrideLambdaS3Key: !Equals
+    - !Ref OverrideLambdaS3Key
+    - ''
+  NotOverrideFlag: !And 
+    - !Condition OverrideLambdaS3Bucket
+    - !Condition OverrideLambdaS3Key
+  OverrideFlag: !And
+    - !Not [Condition:  OverrideLambdaS3Bucket]
+    - !Not [Condition: OverrideLambdaS3Key]
+  
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Amazon Connect Configuration
+        Parameters:
+          - instanceIdParam
+          - instanceNameParam
+      - Label:
+          default: AWS IoT Core Configuration
+        Parameters:
+          - iotCoreEndpointParam
+          - IoTCertificateArn
+          - entryCodeMqttSecretName
+          - IotPubTopic
+          - IotSubTopic
+          - DeviceName
+      - Label:
+          default: Override Lambda Code Location [Leave empty if deploying in US-EAST-1]
+        Parameters:
+          - OverrideLambdaS3Bucket
+          - OverrideLambdaS3Key
+         
+    ParameterLabels:
+      instanceIdParam:
+        default: Instance ID
+      instanceNameParam:
+        default: Instance Alias
+      iotCoreEndpointParam:
+        default: AWS IoT Core Endpoint
+      IoTCertificateArn:
+        default: AWS IoT Thing Certificate ARN
+      IotSubTopic:
+        default: Message queue topic for ESP32 Subscribe
+      IotPubTopic:
+        default: Message queue topic for ESP32 Publish - Note this is not implemented fully in this project but can be used for sensing events with your ESP32
+      entryCodeMqttSecretName:
+        default: SSM Secret Key Parameter name
+
+
+Outputs:
+    IoTBuzzerEntryCodesDDBTable:
+        Description:  The ARN of the DynamoDB table created to store guests contact addresses, associated access codes, and expiration rules
+        Value: !Ref IoTBuzzerEntryCodesDDBTable
+    writeToIoTBuzzerRequest:
+        Condition: NotOverrideFlag
+        Description:  >
+            AWS Lambda Function called by Amazon Connect to validate the callers entry code found in DDB and write to the IoT Core Topic.
+        Value: !Ref WriteToIoTBuzzerRequest
+    writeToIoTBuzzerRequestOverride:
+        Condition: OverrideFlag
+        Description:  >
+            AWS Lambda Function called by Amazon Connect to validate the callers entry code found in DDB and write to the IoT Core Topic.
+        Value: !Ref WriteToIoTBuzzerRequestOverride
+    writeToIoTBuzzerRequestARN:
+        Condition: NotOverrideFlag
+        Description:  ARN for the writeToIoTBuzzerRequest Function
+        Value: !GetAtt WriteToIoTBuzzerRequest.Arn
+    writeToIoTBuzzerRequestARNOverride:
+        Condition: OverrideFlag
+        Description:  ARN for the writeToIoTBuzzerRequest Function
+        Value: !GetAtt WriteToIoTBuzzerRequestOverride.Arn
+        
+Resources:
+    ESP32BuzzerThing:
+      Type: AWS::IoT::Thing
+      Properties:
+        ThingName: !Ref DeviceName
+        AttributePayload:
+          Attributes: {}
+
+    ESPBuzzerPrincipalAttachment:
+      Type: AWS::IoT::ThingPrincipalAttachment
+      Properties:
+        ThingName: !Ref ESP32BuzzerThing
+        Principal: !Ref IoTCertificateArn
+
+    allowConnectToWriteToIoTBuzzerRequestLambda:
+        Type: 'AWS::Lambda::Permission'
+        Condition: NotOverrideFlag
+        Properties:
+            FunctionName: !Ref WriteToIoTBuzzerRequest
+            Action: 'lambda:InvokeFunction'
+            Principal: connect.amazonaws.com
+            SourceAccount: !Ref 'AWS::AccountId'
+  
+    allowConnectToWriteToIoTBuzzerRequestLambdaOverride:
+        Type: 'AWS::Lambda::Permission'
+        Condition: OverrideFlag
+        Properties:
+            FunctionName: !Ref WriteToIoTBuzzerRequestOverride
+            Action: 'lambda:InvokeFunction'
+            Principal: connect.amazonaws.com
+            SourceAccount: !Ref 'AWS::AccountId'
+
+    buzzerIoTPolicy:
+        Type: AWS::IoT::Policy
+        Properties: 
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - 'iot:Connect'
+                Resource:
+                  - !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:client/${DeviceName}'
+              -
+                Effect: "Allow"
+                Action:
+                  - 'iot:Subscribe'
+                  - 'iot:Receive'
+                Resource:
+                  - !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/${IotSubTopic}'
+              -
+                Effect: "Allow"
+                Action:
+                  - 'iot:Publish'
+                Resource:
+                  - !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/${IotPubTopic}'         
+
+    buzzerIoTPolicyAttachment:
+        Type: AWS::IoT::PolicyPrincipalAttachment
+        Properties: 
+          PolicyName: !Ref buzzerIoTPolicy
+          Principal: !Ref IoTCertificateArn
+          
+    IoTBuzzerEntryCodesDDBTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          -
+            AttributeName: "contactAddress"
+            AttributeType: "S"
+          -
+            AttributeName: "entryCode"
+            AttributeType: "N"
+        KeySchema:
+          -
+            AttributeName: "contactAddress"
+            KeyType: "HASH"
+          -
+            AttributeName: "entryCode"
+            KeyType: "RANGE"
+        # assuming 5 concurrent calls
+        ProvisionedThroughput:
+          ReadCapacityUnits:
+              5
+          WriteCapacityUnits:
+              5
+        PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: True
+        SSESpecification:
+            SSEEnabled: True
+        TimeToLiveSpecification:
+            AttributeName:  "expiryTime"
+            Enabled:  True
+        StreamSpecification:
+            StreamViewType: NEW_AND_OLD_IMAGES
+
+    WriteToIoTBuzzerRequestRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+          AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Principal:
+                  Service:
+                    - "lambda.amazonaws.com"
+                Action:
+                  - "sts:AssumeRole"
+          Path: "/"
+          Policies:
+            -
+              PolicyName: dDBFullAccess
+              PolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                  -
+                    Effect: "Allow"
+                    Action:
+                      - 'logs:CreateLogGroup'
+                      - 'logs:CreateLogStream'
+                      - 'logs:PutLogEvents'
+                      - 'dynamodb:GetItem'
+                      - 'dynamodb:PutItem'
+                      - 'dynamodb:UpdateItem'
+                      - 'dynamodb:Query'
+                      - 'dynamodb:Scan'
+                      - 'dynaodb:DescribeTable'
+                    Resource:
+                      - !Sub ${IoTBuzzerEntryCodesDDBTable.Arn}
+                  -
+                    Effect: "Allow"
+                    Action:
+                      - 'ssm:GetParameter'
+                      - 'ssm:GetParameters'
+                    Resource:
+                      - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${entryCodeMqttSecretName}
+                  -
+                    Effect: "Allow"
+                    Action:
+                      - 'iot:Connect'
+                      - 'iot:Publish'
+                      - 'iot:Subscribe'
+                      - 'iot:Receive'
+                      - 'iot:GetThingShadow'
+                      - 'iot:UpdateThingShadow'
+                      - 'iot:DeleteThingShadow'
+                    Resource:
+                      - !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/${IotSubTopic}'
+                  -
+                    Effect: "Allow"
+                    Action:
+                      - 'logs:CreateLogGroup'
+                      - 'logs:CreateLogStream'
+                      - 'logs:PutLogEvents'
+                    Resource: '*'
+
+
+    TestDataInitFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+          Code:
+            ZipFile: |
+              const AWS = require("aws-sdk");
+              const response = require("cfn-response");
+              const docClient = new AWS.DynamoDB.DocumentClient();
+
+              exports.handler = function(event, context) {
+                console.log(JSON.stringify(event));
+                var params = {
+                  TableName: event.ResourceProperties.DynamoTableName,
+                  Item: {
+                    contactAddress: '+15555555555',
+                    entryCode: 123456789,
+                    active: true,
+                    oneTimeUse: false
+                  }
+                };
+                try {
+                  console.log(`Received event with type ${event.RequestType}`);
+                  if(event.RequestType === 'Create') {
+                    docClient.put(params, function(err, data) { 
+                      if (err) {
+                        response.send(event, context, "FAILED", {Data: err});
+                      } else {
+                        response.send(event, context, "SUCCESS", {});
+                      }
+                    });
+                  } else {
+                    response.send(event, context, "SUCCESS", {});
+                  }
+                } catch (error) {
+                  console.log(JSON.stringify(error, 0, 4));
+                  response.send(event, context, "FAILED", {});
+                }
+              };
+          Handler: index.handler
+          Role: !Sub ${WriteToIoTBuzzerRequestRole.Arn}
+          Runtime: nodejs12.x
+          Timeout: 60
+
+    LambdaTrigger:
+      Type: 'Custom::LambdaTrigger'
+      DependsOn: 
+        - WriteToIoTBuzzerRequestRole
+        - TestDataInitFunction
+        - IoTBuzzerEntryCodesDDBTable
+      Properties:
+        ServiceToken: !GetAtt TestDataInitFunction.Arn
+        DynamoTableName: !Ref IoTBuzzerEntryCodesDDBTable
+
+    WriteToIoTBuzzerRequest:
+      Type: "AWS::Lambda::Function"
+      Condition: NotOverrideFlag
+      DependsOn: 
+        - IoTBuzzerEntryCodesDDBTable
+        - WriteToIoTBuzzerRequestRole
+      Properties:
+        Description:  >
+            AWS Lambda Function to DynamoDB and validate that the request is valid before publishing to AWS IoT Core.
+        Handler: "index.handler"
+        Role: !Sub ${WriteToIoTBuzzerRequestRole.Arn}
+        Runtime: "nodejs12.x"
+        MemorySize: 128
+        Timeout: 3
+        Environment:
+            Variables:
+                dDBTableName: !Ref IoTBuzzerEntryCodesDDBTable
+                mqttEndpoint: !Ref iotCoreEndpointParam
+                mqttSecretSsmName: !Ref entryCodeMqttSecretName
+                mqttTopic: 'Esp32B/buzzer/input'
+        Code:
+            S3Bucket: !FindInMap [FunctionMap, Configuration, S3Bucket]
+            S3Key: !Join ["", [!FindInMap [FunctionMap, Configuration, S3Key], 'IoT-Buzzer-AmazonConnectWriteToIoTBuzzerRequest-1XDLHUMBW7OL7-89f04190-c822-4ea7-95e2-ad1ccba5ccc8']]
+
+    WriteToIoTBuzzerRequestOverride:
+      Type: "AWS::Lambda::Function"
+      Condition: OverrideFlag
+      DependsOn: 
+        - IoTBuzzerEntryCodesDDBTable
+        - WriteToIoTBuzzerRequestRole
+      Properties:
+        Description:  >
+            AWS Lambda Function to DynamoDB and validate that the request is valid before publishing to AWS IoT Core.
+        Handler: "index.handler"
+        Role: !Sub ${WriteToIoTBuzzerRequestRole.Arn}
+        Runtime: "nodejs12.x"
+        MemorySize: 128
+        Timeout: 3
+        Environment:
+            Variables:
+                dDBTableName: !Ref IoTBuzzerEntryCodesDDBTable
+                mqttEndpoint: !Ref iotCoreEndpointParam
+                mqttSecretSsmName: !Ref entryCodeMqttSecretName
+                mqttTopic: 'Esp32B/buzzer/input'
+        Code:
+            S3Bucket: !Ref OverrideLambdaS3Bucket
+            S3Key: !Ref OverrideLambdaS3Key
